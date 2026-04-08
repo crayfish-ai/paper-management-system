@@ -1,0 +1,22 @@
+# 数据库文件（包含个人文献数据）
+*.db
+*.db-journal
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.json
+
+# PDF文件（用户数据）
+*.pdf
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 系统文件
+.DS_Store
+Thumbs.db
