@@ -92,34 +92,25 @@ notification:
 
 ## 使用
 
-### 初始化数据库
+### Python 统一入口（推荐）
 
 ```bash
-python3 paper_manager.py index
+python3 paper_management.py auto          # 全自动流程
+python3 paper_management.py index         # 索引
+python3 paper_management.py rename        # 重命名
+python3 paper_management.py extract       # 全文提取
+python3 paper_management.py summarize     # AI提炼
+python3 paper_management.py status        # 状态
+python3 paper_management.py search <关键词> # 搜索
 ```
 
-### 搜索文献
+### 独立模块（兼容旧版）
 
 ```bash
-python3 paper_manager.py search "关键词"
-```
-
-### 自动重命名
-
-```bash
-python3 paper_manager.py rename
-```
-
-### 查看状态
-
-```bash
-python3 paper_manager.py status
-```
-
-### 手动运行自动索引
-
-```bash
-./auto_index.sh
+python3 paper_manager.py index    # 索引
+python3 paper_manager.py search "关键词"   # 搜索
+python3 paper_manager.py status   # 状态
+./auto_index.sh                  # Shell自动化脚本
 ```
 
 ## 定时任务

@@ -1,20 +1,46 @@
 #!/usr/bin/env python3
-"""后台全量提取PDF全文，写入index.db的full_text字段"""
-import fitz, sqlite3, hashlib, os, sys, glob, json, time
+"""
+Full-text extraction for PDFs
+写入 index.db 的 full_text 字段
+"""
 
-DB_PATH = "/data/disk/papers/index.db"
-PAPERS_DIR = "/data/disk/papers"
-LOG_FILE = "/data/disk/papers/extract_fulltext.log"
-FAILED_FILE = "/data/disk/papers/extract_failed.json"
+import fitz
+import sqlite3
+import os
+import sys
+import glob
+import json
+import time
+from pathlib import Path
+
+# Add project directory to path
+PROJECT_DIR = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_DIR))
+
+from config import get_config
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    """Get database connection"""
+    cfg = get_config()
+    conn = sqlite3.connect(cfg.db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
+def get_log_path():
+    """Get log file path from config"""
+    cfg = get_config()
+    log_dir = os.path.dirname(cfg.get("logging.path", "/data/disk/papers/extract_fulltext.log"))
+    return os.path.join(log_dir, "extract_fulltext.log")
+
+def get_failed_path():
+    """Get failed list path from config"""
+    cfg = get_config()
+    log_dir = os.path.dirname(cfg.get("logging.path", "/data/disk/papers/extract_failed.json"))
+    return os.path.join(log_dir, "extract_failed.json")
+
 def extract_fulltext(pdf_path, max_pages=0):
-    """提取PDF全部页面文本，max_pages=0表示全部"""
+    """Extract PDF full text, max_pages=0 means all pages"""
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
@@ -33,7 +59,7 @@ def extract_fulltext(pdf_path, max_pages=0):
         doc.close()
         full = '\n\n'.join(texts)
         
-        # 过滤掉明显是扫描件/纯图片PDF的情况
+        # Skip if text is too short (likely scanned PDF)
         if len(full.strip()) < 50:
             return None, f"文本不足50字符(共{total_pages}页)，可能是扫描件"
         
@@ -41,15 +67,21 @@ def extract_fulltext(pdf_path, max_pages=0):
     except Exception as e:
         return None, str(e)
 
-def main():
-    conn = get_db()
+def extract_all():
+    """Extract full text for all papers without full_text"""
+    cfg = get_config()
+    papers_dir = cfg.papers_dir
     
-    # 统计
-    rows = conn.execute("SELECT id, filepath, title FROM papers WHERE full_text IS NULL").fetchall()
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, filepath, title FROM papers WHERE full_text IS NULL OR full_text = ''"
+    ).fetchall()
     total = len(rows)
     success = 0
     failed = []
-    skipped = 0
+    
+    LOG_FILE = get_log_path()
+    FAILED_FILE = get_failed_path()
     
     log_lines = [f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 开始全文提取，共 {total} 篇待处理"]
     
@@ -60,15 +92,11 @@ def main():
         
         if not os.path.exists(fpath):
             failed.append({"id": pid, "file": fpath, "title": title, "error": "文件不存在"})
-            skipped += 1
             continue
         
-        # 检查是否已提取过（别的同名文件）
-        # 跳过已知的小文件/测试文件
         fsize = os.path.getsize(fpath)
-        if fsize < 1024:  # <1KB
+        if fsize < 1024:
             failed.append({"id": pid, "file": fpath, "title": title, "error": f"文件过小({fsize}B)"})
-            skipped += 1
             continue
         
         text, error = extract_fulltext(fpath)
@@ -78,28 +106,32 @@ def main():
             success += 1
             if (idx + 1) % 20 == 0:
                 conn.commit()
-                log_lines.append(f"  进度: {idx+1}/{total}，成功: {success}，失败: {len(failed)}")
                 print(f"  进度: {idx+1}/{total}，成功: {success}，失败: {len(failed)}", flush=True)
         else:
             failed.append({"id": pid, "file": fpath, "title": title, "error": error})
     
     conn.commit()
+    conn.close()
     
-    log_lines.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 提取完成: 成功 {success}, 失败 {len(failed)}, 跳过 {skipped}")
+    log_lines.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 提取完成: 成功 {success}, 失败 {len(failed)}")
     
-    # 写日志
+    # Write logs
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, 'w') as f:
         f.write('\n'.join(log_lines) + '\n')
     
-    # 写失败列表
     with open(FAILED_FILE, 'w') as f:
         json.dump(failed, f, ensure_ascii=False, indent=2)
     
     print(f"\n=== 完成 ===")
     print(f"成功: {success}")
-    print(f"失败/跳过: {len(failed)}")
+    print(f"失败: {len(failed)}")
     print(f"日志: {LOG_FILE}")
     print(f"失败列表: {FAILED_FILE}")
+
+# Keep backward compatibility
+def main():
+    extract_all()
 
 if __name__ == '__main__':
     main()
