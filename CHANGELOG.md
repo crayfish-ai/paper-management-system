@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1-beta] - 2026-04-10
+
+### Added
+- **feishu-relay integration**: notify 适配 feishu-relay，支持系统级通知
+- **Enhanced error handling**: 关键步骤失败时发送飞书告警
+- **auto_index.sh enhancements**: 索引+全文+AI提炼一体化处理
+
+### Changed
+- **Shell to Python convergence**: shell 脚本向 Python 模块收敛
+- **config 规范化**: 配置统一管理
+
+### Known Issues (Beta)
+- AI summarization quality depends on API model
+- Large PDF batch processing may take time
+
+---
+
 ## [2.0.0] - 2026-04-09
 
 ### Added
