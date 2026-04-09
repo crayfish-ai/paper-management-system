@@ -1,6 +1,7 @@
 # 数据库文件（包含个人文献数据）
 *.db
 *.db-journal
+*.db.backup
 
 # 日志文件
 *.log
@@ -20,3 +21,15 @@ __pycache__/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 配置（用户数据，包含敏感路径）
+config.yaml
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# Backup files
+*.bak
+*.backup

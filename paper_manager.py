@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
 文献管理器 - PDF元数据提取、索引、重命名
+
 用法:
-  python3 /data/disk/papers/paper_manager.py index    # 扫描并索引所有PDF
-  python3 /data/disk/papers/paper_manager.py rename   # 按规范重命名
-  python3 /data/disk/papers/paper_manager.py search <关键词>  # 搜索
-  python3 /data/disk/papers/paper_manager.py status   # 查看索引状态
+  python3 paper_manager.py index    # 扫描并索引所有PDF
+  python3 paper_manager.py rename   # 按规范重命名
+  python3 paper_manager.py search <关键词>  # 搜索
+  python3 paper_manager.py status   # 查看索引状态
+
+配置:
+  配置文件: config.yaml (项目根目录)
+  环境变量: PAPERMGR_* (如 PAPERMGR_DATABASE_PATH)
 """
 
 import fitz
@@ -17,41 +22,66 @@ import sys
 import json
 import glob
 from datetime import datetime
+from pathlib import Path
 
-DB_PATH = "/data/disk/papers/index.db"
-PAPERS_DIR = "/data/disk/papers"
+# Import configuration
+from config import get_config
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    """获取数据库连接"""
+    cfg = get_config()
+    conn = sqlite3.connect(cfg.db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 def init_db():
+    """初始化数据库（支持schema版本）"""
     conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS papers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_hash TEXT UNIQUE NOT NULL,
-            filename TEXT NOT NULL,
-            filepath TEXT NOT NULL,
-            title TEXT,
-            authors TEXT,
-            doi TEXT,
-            year INTEGER,
-            journal TEXT,
-            abstract TEXT,
-            pages INTEGER,
-            file_size INTEGER,
-            indexed_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            renamed INTEGER DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS idx_doi ON papers(doi);
-        CREATE INDEX IF NOT EXISTS idx_year ON papers(year);
-        CREATE INDEX IF NOT EXISTS idx_title ON papers(title);
-        CREATE INDEX IF NOT EXISTS idx_authors ON papers(authors);
-        CREATE INDEX IF NOT EXISTS idx_file_hash ON papers(file_hash);
+    
+    # Schema版本管理
+    SCHEMA_VERSION = 1
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
     """)
+    
+    current_version = conn.execute("SELECT MAX(version) as v FROM schema_version").fetchone()["v"] or 0
+    
+    if current_version < 1:
+        # v1: 初始schema
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS papers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT UNIQUE NOT NULL,
+                filename TEXT NOT NULL,
+                filepath TEXT NOT NULL,
+                title TEXT,
+                authors TEXT,
+                doi TEXT,
+                year INTEGER,
+                journal TEXT,
+                abstract TEXT,
+                pages INTEGER,
+                file_size INTEGER,
+                indexed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                renamed INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_doi ON papers(doi);
+            CREATE INDEX IF NOT EXISTS idx_year ON papers(year);
+            CREATE INDEX IF NOT EXISTS idx_title ON papers(title);
+            CREATE INDEX IF NOT EXISTS idx_authors ON papers(authors);
+            CREATE INDEX IF NOT EXISTS idx_file_hash ON papers(file_hash);
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+    
+    # 未来版本的迁移逻辑可以在这里添加
+    # if current_version < 2:
+    #     # 迁移到v2
+    #     ...
+    
     conn.commit()
     conn.close()
 
@@ -81,26 +111,24 @@ def extract_meta(pdf_path):
         doc.close()
         
         # 提取DOI
-        doi_matches = re.findall(r'10\.\d{4,9}/[^\s,;)"\']+', text)
+        doi_matches = re.findall(r'10\.\d{4,9}/[^\s,;"\']+', text)
         if doi_matches:
-            # 取最长的、最像DOI的
             doi_matches.sort(key=len, reverse=True)
             for d in doi_matches:
                 if re.match(r'10\.\d{4,9}/\S{4,}', d):
                     result["doi"] = d.rstrip('.')
                     break
         
-        # 提取年份（完整的4位年份）
+        # 提取年份
         years = re.findall(r'\b((?:19|20)\d{2})\b', text[:2000])
         if years:
             result["year"] = int(years[0])
         
-        # 提取标题（如果metadata里没有）
+        # 提取标题
         if not result["title"]:
             lines = [l.strip() for l in text.split('\n') if l.strip()]
             candidates = []
             for l in lines[:20]:
-                # 过滤掉明显的非标题行
                 if len(l) < 15:
                     continue
                 if l.startswith('10.'):
@@ -113,16 +141,13 @@ def extract_meta(pdf_path):
                     continue
                 candidates.append(l)
             if candidates:
-                # 标题通常是字号最大的（在PDF中最靠前的长文本）
                 result["title"] = candidates[0][:500]
         
         # 提取作者
         if not result["authors"]:
-            # 尝试从标题后提取作者
             lines = [l.strip() for l in text.split('\n') if l.strip()]
             for i, l in enumerate(lines[:15]):
                 if result["title"] and result["title"] in l:
-                    # 标题行的下一行可能就是作者
                     if i + 1 < len(lines):
                         author_line = lines[i + 1].strip()
                         if 5 < len(author_line) < 300 and not author_line.startswith('10.'):
@@ -137,11 +162,10 @@ def extract_meta(pdf_path):
         if abs_match:
             result["abstract"] = re.sub(r'\s+', ' ', abs_match.group(1).strip())[:1000]
         
-        # 提取期刊名（从DOI或文本中）
+        # 提取期刊名
         if result["doi"]:
-            pass  # DOI本身可以标识期刊
+            pass
         else:
-            # 尝试从文本中找期刊名
             journal_match = re.search(r'(\w+\s+(?:Journal|Medicine|Surgery|Science|Letters|Biology|Physics|Chemistry|Review|Bio|Clinic))', text[:1000], re.I)
             if journal_match:
                 result["journal"] = journal_match.group(1).strip()
@@ -153,13 +177,15 @@ def extract_meta(pdf_path):
 
 def index_all(progress=True):
     """扫描并索引所有PDF"""
+    cfg = get_config()
+    papers_dir = cfg.papers_dir
+    
     init_db()
     conn = get_db()
     
-    # 获取已索引的hash集合
     indexed = set(row[0] for row in conn.execute("SELECT file_hash FROM papers").fetchall())
     
-    pdf_files = glob.glob(os.path.join(PAPERS_DIR, "*.pdf"))
+    pdf_files = glob.glob(os.path.join(papers_dir, "*.pdf"))
     new_count = 0
     skip_count = 0
     error_count = 0
@@ -202,6 +228,9 @@ def index_all(progress=True):
 
 def rename_all():
     """按规范重命名所有已索引文件"""
+    cfg = get_config()
+    papers_dir = cfg.papers_dir
+    
     conn = get_db()
     papers = conn.execute("SELECT id, filepath, filename, title, year, doi, authors, renamed FROM papers WHERE renamed=0").fetchall()
     
@@ -209,24 +238,20 @@ def rename_all():
     errors = 0
     for p in papers:
         try:
-            # 构建新文件名
             year = p["year"] or "0000"
             title = p["title"] or os.path.splitext(p["filename"])[0]
             doi = p["doi"] or ""
             
-            # 清理标题
             title = re.sub(r'[\\/:*?"<>|\n\r]', ' ', title)
             title = re.sub(r'\s+', ' ', title).strip()
             if len(title) > 120:
                 title = title[:120]
             
-            # 构建文件名: 年份_标题_DOI.pdf
             if doi:
                 new_name = f"{year}_{title}_{doi.replace('/', '@')}.pdf"
             else:
                 new_name = f"{year}_{title}.pdf"
             
-            # 处理文件名过长
             if len(new_name) > 200:
                 title = title[:80]
                 if doi:
@@ -234,18 +259,16 @@ def rename_all():
                 else:
                     new_name = f"{year}_{title}.pdf"
             
-            new_path = os.path.join(PAPERS_DIR, new_name)
+            new_path = os.path.join(papers_dir, new_name)
             
-            # 避免冲突
             if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(p["filepath"]):
                 base, ext = os.path.splitext(new_name)
                 c = 1
-                while os.path.exists(os.path.join(PAPERS_DIR, f"{base}_{c}{ext}")):
+                while os.path.exists(os.path.join(papers_dir, f"{base}_{c}{ext}")):
                     c += 1
-                new_path = os.path.join(PAPERS_DIR, f"{base}_{c}{ext}")
+                new_path = os.path.join(papers_dir, f"{base}_{c}{ext}")
                 new_name = os.path.basename(new_path)
             
-            # 重命名
             os.rename(p["filepath"], new_path)
             conn.execute("UPDATE papers SET filepath=?, filename=?, renamed=1 WHERE id=?",
                         (new_path, new_name, p["id"]))
@@ -315,9 +338,23 @@ def get_abstract(paper_id):
     else:
         print("未找到摘要")
 
+USAGE = """文献管理器 - PDF元数据提取、索引、重命名
+
+用法:
+  python3 paper_manager.py index    # 扫描并索引所有PDF
+  python3 paper_manager.py rename   # 按规范重命名
+  python3 paper_manager.py search <关键词>  # 搜索
+  python3 paper_manager.py status   # 查看索引状态
+  python3 paper_manager.py abstract <id>  # 查看摘要
+
+配置:
+  - config.yaml (项目根目录)
+  - 环境变量 PAPERMGR_* (如 PAPERMGR_DATABASE_PATH)
+"""
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print(__doc__)
+        print(USAGE)
         sys.exit(1)
     
     cmd = sys.argv[1]
@@ -333,4 +370,4 @@ if __name__ == "__main__":
         get_abstract(int(sys.argv[2]))
     else:
         print(f"未知命令: {cmd}")
-        print(__doc__)
+        print(USAGE)

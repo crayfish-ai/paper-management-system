@@ -1,22 +1,42 @@
 #!/usr/bin/env python3
 """
 AI智能文献提炼模块
+
+功能：
 - 读取新提取全文的文献
 - 生成结构化摘要
 - 保存到ai_summary字段
-- 发送飞书通知
+- 发送通知（可配置）
+
+配置（config.yaml 或环境变量 PAPERMGR_*）：
+- ai.enabled: 是否启用AI提炼
+- ai.provider: AI提供商 (openai/anthropic)
+- ai.model: 模型名称
+- notification.enabled: 是否发送通知
+- notification.cmd: 通知命令路径（或 stdout）
 """
 
 import sqlite3
 import sys
 import os
 import re
+import subprocess
+from pathlib import Path
 
-DB_PATH = "/data/disk/papers/index.db"
+# Add project directory to path
+PROJECT_DIR = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_DIR))
+
+from config import get_config
+
+def get_db():
+    """获取数据库连接"""
+    cfg = get_config()
+    return sqlite3.connect(cfg.db_path)
 
 def get_papers_need_summary():
-    """获取需要AI提炼的文献（有full_text但没有ai_summary）"""
-    conn = sqlite3.connect(DB_PATH)
+    """获取需要AI提炼的文献"""
+    conn = get_db()
     conn.row_factory = sqlite3.Row
     papers = conn.execute("""
         SELECT id, title, authors, doi, year, journal, full_text 
@@ -30,11 +50,8 @@ def get_papers_need_summary():
     conn.close()
     return papers
 
-
-
 def generate_summary(title, authors, journal, year, full_text):
-    """生成结构化中文摘要（带医学术语翻译）"""
-    # 提取关键信息
+    """生成结构化中文摘要"""
     summary_parts = []
     
     # 1. 研究背景/目的
@@ -65,14 +82,13 @@ def generate_summary(title, authors, journal, year, full_text):
     if conclusion:
         summary_parts.append(f"💡 **核心结论**: {conclusion[:200]}...")
     
-    # 如果没有提取到内容，使用abstract
+    # 兜底：使用abstract
     if not summary_parts:
         abstract_match = re.search(r'Abstract[\s:]*(.*?)(?:Keywords|Introduction|$)', 
                                    full_text, re.DOTALL | re.IGNORECASE)
         if abstract_match:
             summary_parts.append(f"📝 **摘要**: {abstract_match.group(1)[:500]}...")
     
-    # 构建中文格式的头部信息
     header_lines = ["📄 **文献AI提炼**", ""]
     if title:
         header_lines.append(f"**标题**: {title}")
@@ -88,24 +104,16 @@ def generate_summary(title, authors, journal, year, full_text):
     return header + "\n\n".join(summary_parts)
 
 def extract_section(text, start_keywords, end_keywords):
-    """从文本中提取特定章节（改进版）"""
-    import re
-    
-    # 清理文本中的常见噪音
+    """提取特定章节"""
     text = re.sub(r'ARTICLE IN PRESS|ACCEPTED MANUSCRIPT|© The Author\(s\).*?licence', '', text, flags=re.IGNORECASE)
     text = re.sub(r'https?://\S+', '', text)
     
-    # 构建正则表达式
     start_pattern = '|'.join(re.escape(k) for k in start_keywords)
     end_pattern = '|'.join(re.escape(k) for k in end_keywords)
     
-    # 尝试多种匹配模式
     patterns = [
-        # 标准格式: Keyword: content
         rf'(?:{start_pattern})[\s:]+\n?(.*?)(?:(?:{end_pattern})|$)',
-        # 大写格式: KEYWORD\ncontent
         rf'(?:{start_pattern})\s*\n\s*\n?(.*?)(?:(?:{end_pattern})|$)',
-        # 带数字格式: 1. Keyword\ncontent
         rf'\d+\.\s*(?:{start_pattern})[\s:]*\n?(.*?)(?:(?:{end_pattern})|$)',
     ]
     
@@ -113,39 +121,58 @@ def extract_section(text, start_keywords, end_keywords):
         match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
         if match:
             section = match.group(1).strip()
-            # 清理多余空白和特殊字符
             section = re.sub(r'\s+', ' ', section)
-            section = re.sub(r'^[\s\W]+', '', section)  # 移除开头的非文字字符
-            if len(section) > 20:  # 确保内容有意义
+            section = re.sub(r'^[\s\W]+', '', section)
+            if len(section) > 20:
                 return section
     return ""
 
 def save_summary(paper_id, summary):
-    """保存AI提炼结果到数据库"""
-    conn = sqlite3.connect(DB_PATH)
+    """保存AI提炼结果"""
+    conn = get_db()
     conn.execute("UPDATE papers SET ai_summary = ? WHERE id = ?", (summary, paper_id))
     conn.commit()
     conn.close()
 
-def send_feishu_notification(summary, doi=None):
-    """发送飞书通知"""
-    import subprocess
-    
-    title = "📚 新文献AI提炼"
-    message = summary[:1500]  # 限制长度
-    
-    if doi:
-        message += f"\n\n🔗 DOI: {doi}"
-    
-    # 调用feishu-notifier
-    cmd = f'/opt/feishu-notifier/bin/notify "{title}" "{message}"'
-    try:
-        subprocess.run(cmd, shell=True, check=True)
+def send_notification(title, message, notify_cmd):
+    """发送通知（适配器模式）"""
+    if not notify_cmd or notify_cmd.strip() == "":
+        print(f"[NOTIFICATION DISABLED] {title}: {message[:100]}...")
         return True
-    except:
+    
+    if notify_cmd.lower() == "stdout":
+        print(f"\n{'='*60}")
+        print(f"通知: {title}")
+        print(f"{'='*60}")
+        print(message)
+        print(f"{'='*60}\n")
+        return True
+    
+    # 执行外部通知命令
+    try:
+        cmd = f'{notify_cmd} "{title}" "{message[:1500]}"'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            print(f"✓ 通知已发送")
+            return True
+        else:
+            print(f"✗ 通知失败: {result.stderr[:200]}")
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"✗ 通知超时")
+        return False
+    except Exception as e:
+        print(f"✗ 通知异常: {e}")
         return False
 
 def main():
+    cfg = get_config()
+    
+    # 检查是否启用
+    if not cfg.ai_enabled:
+        print("AI提炼功能未启用（ai.enabled=false）")
+        return
+    
     papers = get_papers_need_summary()
     
     if not papers:
@@ -154,9 +181,12 @@ def main():
     
     print(f"发现 {len(papers)} 篇需要AI提炼的文献")
     
-    for paper in papers:
+    # 获取通知配置
+    notify_cmd = cfg.notification_cmd if cfg.notification_enabled else ""
+    
+    for i, paper in enumerate(papers):
         title_display = paper['title'][:50] if paper['title'] else f"ID:{paper['id']}"
-        print(f"\n处理: {title_display}...")
+        print(f"\n处理 [{i+1}/{len(papers)}]: {title_display}...")
         
         # 生成摘要
         summary = generate_summary(
@@ -171,10 +201,9 @@ def main():
         save_summary(paper['id'], summary)
         print(f"✓ 已保存提炼内容 (ID: {paper['id']})")
         
-        # 发送飞书通知（只发送最新的1篇，避免刷屏）
-        if paper == papers[0]:  # 只发送第一篇
-            send_feishu_notification(summary, paper['doi'])
-            print("✓ 已发送飞书通知")
+        # 发送通知（只发送最新的一篇）
+        if i == 0 and notify_cmd:
+            send_notification("📚 新文献AI提炼", summary, notify_cmd)
 
 if __name__ == "__main__":
     main()
