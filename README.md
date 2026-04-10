@@ -118,3 +118,35 @@ python3 scripts/paper_manager.py status
 ## 与 OpenClaw 集成
 
 本系统可作为 OpenClaw skill 使用，通过 `feishu-relay` 发送飞书通知。
+
+---
+
+## 🔒 Security
+
+### Never Commit Credentials
+
+Do **NOT** commit the following to the repository:
+- `.env` files containing real API keys or tokens
+- `config.yaml` with actual credentials
+- Any file containing `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.
+
+### Pre-commit Secret Check
+
+Before committing, run the pre-commit secret check:
+```bash
+git config core.hooksPath .githooks
+python3 scripts/check_secrets.py
+```
+
+### If You Accidentally Exposed a Secret
+
+1. **Immediately rotate the secret** (regenerate API key)
+2. Clean git history:
+   ```bash
+   pip install git-filter-repo
+   git filter-repo --path path/to/exposed/file --invert-paths --force
+   git push origin --force --all
+   git push origin --force --tags
+   ```
+3. Review GitHub Secret Scanning alerts
+
