@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+config.yaml
+*.db
+*.db-shm
+*.db-wal
+papers/
+downloads/
+data/
+logs/
+.DS_Store
