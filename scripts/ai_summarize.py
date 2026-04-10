@@ -20,6 +20,7 @@ import sqlite3
 import sys
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -148,10 +149,10 @@ def send_notification(title, message, notify_cmd):
         print(f"{'='*60}\n")
         return True
     
-    # 执行外部通知命令
+    # 执行外部通知命令（安全：无 shell=True）
     try:
-        cmd = f'{notify_cmd} "{title}" "{message[:1500]}"'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        cmd_parts = shlex.split(notify_cmd) + [title, message[:1500]]
+        result = subprocess.run(cmd_parts, shell=False, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             print(f"✓ 通知已发送")
             return True
